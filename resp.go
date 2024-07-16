@@ -15,12 +15,31 @@ const (
 	ARRAY   = '*'
 )
 
-type Value struct {
-	typ   string
-	str   string
-	num   int
-	bulk  string
+type Value interface {
+	Marshal() []byte
+}
+
+type StringValue struct {
+	str string
+}
+
+type NumValue struct {
+	num int
+}
+
+type BulkValue struct {
+	bulk string
+}
+
+type ArrayValue struct {
 	array []Value
+}
+
+type ErrorValue struct {
+	err error
+}
+
+type NullValue struct {
 }
 
 type Resp struct {
@@ -32,24 +51,21 @@ func NewResp(rd io.Reader) *Resp {
 }
 
 // read byte-by-byte until we find a new-line separator
-func (r *Resp) readLine() (line []byte, n int, err error) {
-	for {
-		b, err := r.reader.ReadByte()
-		if err != nil {
-			return nil, 0, err
-		}
-		n += 1
-		line = append(line, b)
-		if len(line) >= 2 && line[len(line)-2] == '\r' {
-			break
-		}
+func (r *Resp) readLine() ([]byte, int, error) {
+	line, err := r.reader.ReadBytes('\n')
+	if err != nil {
+		return nil, 0, err
+	}
+	n := len(line)
+	if n < 2 || line[n-2] != '\r' {
+		return nil, n, fmt.Errorf("invalid line ending")
 	}
 
 	// return line without the last 2 bytes, which are \r\n
 	return line[:len(line)-2], n, nil
 }
 
-func (r *Resp) readInteger() (x int, n int, err error) {
+func (r *Resp) readInteger() (int, int, error) {
 	line, n, err := r.readLine()
 	if err != nil {
 		return 0, 0, err
@@ -68,7 +84,7 @@ func (r *Resp) Read() (Value, error) {
 	_type, err := r.reader.ReadByte()
 
 	if err != nil {
-		return Value{}, err
+		return ErrorValue{err: err}, err
 	}
 
 	// choose how we read the data, based on type
@@ -79,13 +95,12 @@ func (r *Resp) Read() (Value, error) {
 		return r.readBulk()
 	default:
 		fmt.Printf("Unknown type: %v", string(_type))
-		return Value{}, nil
+		return NullValue{}, nil
 	}
 }
 
 func (r *Resp) readArray() (Value, error) {
-	v := Value{}
-	v.typ = "array"
+	v := ArrayValue{}
 
 	// read length of array
 	len, _, err := r.readInteger()
@@ -109,9 +124,7 @@ func (r *Resp) readArray() (Value, error) {
 }
 
 func (r *Resp) readBulk() (Value, error) {
-	v := Value{}
-
-	v.typ = "bulk"
+	v := BulkValue{}
 
 	len, _, err := r.readInteger()
 	if err != nil {
@@ -130,24 +143,7 @@ func (r *Resp) readBulk() (Value, error) {
 	return v, nil
 }
 
-func (v Value) Marshal() []byte {
-	switch v.typ {
-	case "array":
-		return v.marshalArray()
-	case "bulk":
-		return v.marshalBulk()
-	case "string":
-		return v.marshalString()
-	case "null":
-		return v.marshalNull()
-	case "error":
-		return v.marshalError()
-	default:
-		return []byte{}
-	}
-}
-
-func (v Value) marshalString() []byte {
+func (v StringValue) Marshal() []byte {
 	var bytes []byte
 	bytes = append(bytes, STRING)
 	bytes = append(bytes, v.str...)
@@ -156,7 +152,7 @@ func (v Value) marshalString() []byte {
 	return bytes
 }
 
-func (v Value) marshalBulk() []byte {
+func (v BulkValue) Marshal() []byte {
 	var bytes []byte
 	bytes = append(bytes, BULK)
 	bytes = append(bytes, strconv.Itoa(len(v.bulk))...)
@@ -167,7 +163,7 @@ func (v Value) marshalBulk() []byte {
 	return bytes
 }
 
-func (v Value) marshalArray() []byte {
+func (v ArrayValue) Marshal() []byte {
 	var bytes []byte
 	len := len(v.array)
 
@@ -182,15 +178,15 @@ func (v Value) marshalArray() []byte {
 	return bytes
 }
 
-func (v Value) marshalError() []byte {
+func (v ErrorValue) Marshal() []byte {
 	var bytes []byte
 	bytes = append(bytes, ERROR)
-	bytes = append(bytes, v.str...)
+	bytes = append(bytes, v.err.Error()...)
 	bytes = append(bytes, '\r', '\n')
 
 	return bytes
 }
 
-func (v Value) marshalNull() []byte {
+func (v NullValue) Marshal() []byte {
 	return []byte("$-1\r\n")
 }

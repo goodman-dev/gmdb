@@ -39,8 +39,7 @@ type ErrorValue struct {
 	err error
 }
 
-type NullValue struct {
-}
+type NullValue struct{}
 
 type Resp struct {
 	reader *bufio.Reader
@@ -50,143 +49,145 @@ func NewResp(rd io.Reader) *Resp {
 	return &Resp{reader: bufio.NewReader(rd)}
 }
 
-// read byte-by-byte until we find a new-line separator
-func (r *Resp) readLine() ([]byte, int, error) {
+// readLine reads a line until \r\n
+func (r *Resp) readLine() ([]byte, error) {
 	line, err := r.reader.ReadBytes('\n')
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	n := len(line)
 	if n < 2 || line[n-2] != '\r' {
-		return nil, n, fmt.Errorf("invalid line ending")
+		return nil, fmt.Errorf("invalid line ending")
 	}
 
 	// return line without the last 2 bytes, which are \r\n
-	return line[:len(line)-2], n, nil
+	return line[:len(line)-2], nil
 }
 
-func (r *Resp) readInteger() (int, int, error) {
-	line, n, err := r.readLine()
+// readInteger reads an integer from the RESP stream
+func (r *Resp) readInteger() (int, error) {
+	line, err := r.readLine()
 	if err != nil {
-		return 0, 0, err
+		return 0, err
 	}
 
 	i64, err := strconv.ParseInt(string(line), 10, 64)
 	if err != nil {
-		return 0, n, err
+		return 0, err
 	}
-	return int(i64), n, nil
+	return int(i64), nil
 }
 
+// Read reads a RESP value from the stream
 func (r *Resp) Read() (Value, error) {
-
-	// read the first byte, which should indicate data type
-	_type, err := r.reader.ReadByte()
-
+	typ, err := r.reader.ReadByte()
 	if err != nil {
 		return ErrorValue{err: err}, err
 	}
 
-	// choose how we read the data, based on type
-	switch _type {
+	switch typ {
 	case ARRAY:
+		fmt.Println("read an array")
 		return r.readArray()
 	case BULK:
+		fmt.Println("read a bulk")
 		return r.readBulk()
 	default:
-		fmt.Printf("Unknown type: %v", string(_type))
-		return NullValue{}, nil
+		return nil, fmt.Errorf("unknown type: %v", string(typ))
 	}
 }
 
+// readArray reads an array from the RESP stream
 func (r *Resp) readArray() (Value, error) {
 	v := ArrayValue{}
 
 	// read length of array
-	len, _, err := r.readInteger()
+	len, err := r.readInteger()
 	if err != nil {
 		return v, err
 	}
 
 	// foreach line, parse and read the value
-	v.array = make([]Value, 0)
+	v.array = make([]Value, len)
 	for i := 0; i < len; i++ {
 		val, err := r.Read()
 		if err != nil {
 			return v, err
 		}
-
-		// append parsed value to array
-		v.array = append(v.array, val)
+		v.array[i] = val
 	}
 
 	return v, nil
 }
 
+// readBulk reads a bulk string from the RESP stream
 func (r *Resp) readBulk() (Value, error) {
 	v := BulkValue{}
 
-	len, _, err := r.readInteger()
+	len, err := r.readInteger()
 	if err != nil {
 		return v, err
 	}
 
 	bulk := make([]byte, len)
-
-	r.reader.Read(bulk)
+	_, err = io.ReadFull(r.reader, bulk)
+	if err != nil {
+		return v, err
+	}
 
 	v.bulk = string(bulk)
 
-	// Read the trailing CRLF
-	r.readLine()
+	// Ensure the trailing CRLF is read and handled
+	crlf, err := r.readLine()
+	if err != nil {
+		return v, err
+	}
+	if string(crlf) != "" {
+		return v, fmt.Errorf("invalid bulk string ending")
+	}
+
+	fmt.Println(v.bulk)
 
 	return v, nil
 }
 
 func (v StringValue) Marshal() []byte {
-	var bytes []byte
-	bytes = append(bytes, STRING)
-	bytes = append(bytes, v.str...)
-	bytes = append(bytes, '\r', '\n')
-
-	return bytes
+	return append([]byte{STRING}, append([]byte(v.str), '\r', '\n')...)
 }
 
 func (v BulkValue) Marshal() []byte {
-	var bytes []byte
-	bytes = append(bytes, BULK)
-	bytes = append(bytes, strconv.Itoa(len(v.bulk))...)
-	bytes = append(bytes, '\r', '\n')
-	bytes = append(bytes, v.bulk...)
-	bytes = append(bytes, '\r', '\n')
-
-	return bytes
+	return append(append([]byte{BULK}, append([]byte(strconv.Itoa(len(v.bulk))), '\r', '\n')...), append([]byte(v.bulk), '\r', '\n')...)
 }
 
 func (v ArrayValue) Marshal() []byte {
-	var bytes []byte
-	len := len(v.array)
-
-	bytes = append(bytes, ARRAY)
-	bytes = append(bytes, strconv.Itoa(len)...)
-	bytes = append(bytes, '\r', '\n')
-
-	for i := 0; i < len; i++ {
-		bytes = append(bytes, v.array[i].Marshal()...)
+	bytes := append([]byte{ARRAY}, append([]byte(strconv.Itoa(len(v.array))), '\r', '\n')...)
+	for _, val := range v.array {
+		bytes = append(bytes, val.Marshal()...)
 	}
-
 	return bytes
 }
 
 func (v ErrorValue) Marshal() []byte {
-	var bytes []byte
-	bytes = append(bytes, ERROR)
-	bytes = append(bytes, v.err.Error()...)
-	bytes = append(bytes, '\r', '\n')
-
-	return bytes
+	return append([]byte{ERROR}, append([]byte(v.err.Error()), '\r', '\n')...)
 }
 
 func (v NullValue) Marshal() []byte {
 	return []byte("$-1\r\n")
+}
+
+type Writer struct {
+	writer io.Writer
+}
+
+func NewWriter(w io.Writer) *Writer {
+	return &Writer{writer: w}
+}
+
+func (w *Writer) Write(v Value) error {
+	bytes := v.Marshal()
+	_, err := w.writer.Write(bytes)
+	if err != nil {
+		return err
+	}
+	return nil
 }

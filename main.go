@@ -3,16 +3,22 @@ package main
 import (
 	"fmt"
 	"net"
+	"strings"
 )
 
 func main() {
 	fmt.Println("Hello db user!")
 
-	listener, err := net.Listen("tcp", ":6379")
+	prot := "tcp"
+	port := 6379
+
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
+
+	fmt.Printf("Listening on %s port %d\r\n", prot, port)
 
 	defer listener.Close()
 
@@ -38,13 +44,39 @@ func handleConnection(con net.Conn) {
 			return
 		}
 
+		var arrVal ArrayValue
+		var ok bool
+
+		if arrVal, ok = val.(ArrayValue); !ok {
+			fmt.Println("Invalid request, expected array")
+			continue
+		}
+
+		if len(arrVal.array) == 0 {
+			fmt.Println("Invalid request, expected array of length > 0")
+			continue
+		}
+
+		fmt.Println("Received:")
 		fmt.Println(val)
 
+		command := strings.ToUpper(arrVal.array[0].(BulkValue).bulk)
+		args := arrVal.array[1:]
+
 		writer := NewWriter(con)
-		err = writer.Write(StringValue{str: "OK"})
-		if err != nil {
-			fmt.Println(err)
-			return
+
+		handler, ok := Handlers[command]
+		if !ok {
+			fmt.Println("Invalid command: ", command)
+			writer.Write(ErrorValue{err: fmt.Errorf("invalid command")})
+			continue
 		}
+
+		result := handler(args)
+		writer.Write(result)
+
+		fmt.Println("Responded:")
+		fmt.Println(result)
+
 	}
 }

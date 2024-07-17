@@ -87,10 +87,8 @@ func (r *Resp) Read() (Value, error) {
 
 	switch typ {
 	case ARRAY:
-		fmt.Println("read an array")
 		return r.readArray()
 	case BULK:
-		fmt.Println("read a bulk")
 		return r.readBulk()
 	default:
 		return nil, fmt.Errorf("unknown type: %v", string(typ))
